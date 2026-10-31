@@ -15,21 +15,21 @@ Arquivo: `robo_car_racer/robo_car_racer.ino` (não precisa de nenhuma biblioteca
 
 Se a sua ligação for diferente, mude só os números no topo do código (seção `CONFIGURACOES - PINOS`).
 
-### Ponte H 1 – FRENTE (motores dianteiros)
+### Ponte H DIANTEIRA
 | L298N | ESP32 |
 |------|-------|
-| IN1 (motor diant. esquerdo) | D22 |
-| IN2 (motor diant. esquerdo) | D21 |
-| IN3 (motor diant. direito) | D19 |
-| IN4 (motor diant. direito) | D18 |
+| IN1 (motor diant. esquerdo) | D14 |
+| IN2 (motor diant. esquerdo) | D27 |
+| IN3 (motor diant. direito) | D26 |
+| IN4 (motor diant. direito) | D25 |
 
-### Ponte H 2 – TRÁS (motores traseiros)
+### Ponte H TRASEIRA
 | L298N | ESP32 |
 |------|-------|
 | IN1 (motor tras. esquerdo) | RX2 (16) |
 | IN2 (motor tras. esquerdo) | TX2 (17) |
-| IN3 (motor tras. direito) | D15 |
-| IN4 (motor tras. direito) | D2 |
+| IN3 (motor tras. direito) | D18 |
+| IN4 (motor tras. direito) | D19 |
 
 > **ENA e ENB não são usados: deixe os jumpers neles** (vêm de fábrica). Os motores andam sempre na velocidade máxima.
 >
@@ -38,9 +38,9 @@ Se a sua ligação for diferente, mude só os números no topo do código (seç�
 ### Sensores HC-SR04
 | Sensor | TRIG | ECHO |
 |--------|------|------|
-| Esquerdo | D25 | VN (39) |
-| Centro | D33 | D34 |
-| Direito | D32 | D35 |
+| Esquerdo | D33 | D34 |
+| Centro | D5 | D35 |
+| Direito | D15 | VN (39) |
 
 VCC dos sensores no **5V** (VIN). O ECHO sai em 5V: o ideal é colocar um divisor de tensão (resistor de 1k em série + 2k para o GND) em cada ECHO.
 

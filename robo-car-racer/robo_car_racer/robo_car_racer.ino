@@ -30,27 +30,29 @@
 // =====================================================================
 // (Os numeros sao os "Dxx" escritos na placa: RX2 = 16, TX2 = 17, VN = 39.)
 
-// ---------- Ponte H 1 (FRENTE) ----------
-const int PH1_IN1 = 22;   // motor dianteiro esquerdo
-const int PH1_IN2 = 21;   // motor dianteiro esquerdo
-const int PH1_IN3 = 19;   // motor dianteiro direito
-const int PH1_IN4 = 18;   // motor dianteiro direito
+// ENA e ENB NAO sao usados: deixe os jumpers neles nas pontes H.
 
-// ---------- Ponte H 2 (TRAS) ----------
+// ---------- Ponte H DIANTEIRA ----------
+const int PH1_IN1 = 14;   // D14 - motor dianteiro esquerdo
+const int PH1_IN2 = 27;   // D27 - motor dianteiro esquerdo
+const int PH1_IN3 = 26;   // D26 - motor dianteiro direito
+const int PH1_IN4 = 25;   // D25 - motor dianteiro direito
+
+// ---------- Ponte H TRASEIRA ----------
 const int PH2_IN1 = 16;   // RX2 - motor traseiro esquerdo
 const int PH2_IN2 = 17;   // TX2 - motor traseiro esquerdo
-const int PH2_IN3 = 15;   // motor traseiro direito
-const int PH2_IN4 = 2;    // motor traseiro direito
+const int PH2_IN3 = 18;   // D18 - motor traseiro direito
+const int PH2_IN4 = 19;   // D19 - motor traseiro direito
 
 // ---------- Sensores HC-SR04 ----------
 // ATENCAO: o ECHO sai com 5V. O ideal e usar divisor de tensao
 // (1k em serie + 2k para o GND).
-const int SENS_ESQ_TRIG    = 25;
-const int SENS_ESQ_ECHO    = 39;  // VN
-const int SENS_CENTRO_TRIG = 33;
-const int SENS_CENTRO_ECHO = 34;
-const int SENS_DIR_TRIG    = 32;
-const int SENS_DIR_ECHO    = 35;
+const int SENS_ESQ_TRIG    = 33;  // D33
+const int SENS_ESQ_ECHO    = 34;  // D34
+const int SENS_CENTRO_TRIG = 5;   // D5
+const int SENS_CENTRO_ECHO = 35;  // D35
+const int SENS_DIR_TRIG    = 15;  // D15
+const int SENS_DIR_ECHO    = 39;  // VN
 
 // ---------- Botao de largada ----------
 // Botao BOOT da placa. Liga o carrinho -> aperta BOOT -> ele larga.
