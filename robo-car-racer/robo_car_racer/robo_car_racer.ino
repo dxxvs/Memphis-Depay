@@ -163,44 +163,34 @@ void pwmEscrever(int pino, int canal, uint32_t duty) {
 }
 
 // ----- Motores (so IN1..IN4, sem ENA/ENB) -----
-struct Motor {
-  int inA, inB;
-  bool invertido;
-};
-
-Motor motDiantEsq = {PH1_IN1, PH1_IN2, false};
-Motor motDiantDir = {PH1_IN3, PH1_IN4, false};
-Motor motTrasEsq  = {PH2_IN1, PH2_IN2, false};
-Motor motTrasDir  = {PH2_IN3, PH2_IN4, false};
-
-void motorIniciar(Motor &m) {
-  pinMode(m.inA, OUTPUT);
-  pinMode(m.inB, OUTPUT);
-  digitalWrite(m.inA, LOW);
-  digitalWrite(m.inB, LOW);
+void motorIniciar(int inA, int inB) {
+  pinMode(inA, OUTPUT);
+  pinMode(inB, OUTPUT);
+  digitalWrite(inA, LOW);
+  digitalWrite(inB, LOW);
 }
 
 // sentido: +1 = frente, -1 = re, 0 = parado
-void motorAcionar(Motor &m, int sentido) {
-  if (m.invertido) sentido = -sentido;
+void motorAcionar(int inA, int inB, bool invertido, int sentido) {
+  if (invertido) sentido = -sentido;
   if (sentido > 0) {
-    digitalWrite(m.inA, HIGH);
-    digitalWrite(m.inB, LOW);
+    digitalWrite(inA, HIGH);
+    digitalWrite(inB, LOW);
   } else if (sentido < 0) {
-    digitalWrite(m.inA, LOW);
-    digitalWrite(m.inB, HIGH);
+    digitalWrite(inA, LOW);
+    digitalWrite(inB, HIGH);
   } else {
-    digitalWrite(m.inA, LOW);
-    digitalWrite(m.inB, LOW);
+    digitalWrite(inA, LOW);
+    digitalWrite(inB, LOW);
   }
 }
 
 // cada lado: +1 frente, -1 re, 0 parado
 void motoresLados(int ladoEsq, int ladoDir) {
-  motorAcionar(motDiantEsq, ladoEsq);
-  motorAcionar(motTrasEsq,  ladoEsq);
-  motorAcionar(motDiantDir, ladoDir);
-  motorAcionar(motTrasDir,  ladoDir);
+  motorAcionar(PH1_IN1, PH1_IN2, INV_DIANT_ESQ, ladoEsq);  // dianteiro esquerdo
+  motorAcionar(PH2_IN1, PH2_IN2, INV_TRAS_ESQ,  ladoEsq);  // traseiro esquerdo
+  motorAcionar(PH1_IN3, PH1_IN4, INV_DIANT_DIR, ladoDir);  // dianteiro direito
+  motorAcionar(PH2_IN3, PH2_IN4, INV_TRAS_DIR,  ladoDir);  // traseiro direito
 }
 
 void motoresParar() { motoresLados(0, 0); }
@@ -346,15 +336,10 @@ void setup() {
   delay(200);
   Serial.println("\n=== ROBO CAR RACER ===");
 
-  motDiantEsq.invertido = INV_DIANT_ESQ;
-  motDiantDir.invertido = INV_DIANT_DIR;
-  motTrasEsq.invertido  = INV_TRAS_ESQ;
-  motTrasDir.invertido  = INV_TRAS_DIR;
-
-  motorIniciar(motDiantEsq);
-  motorIniciar(motDiantDir);
-  motorIniciar(motTrasEsq);
-  motorIniciar(motTrasDir);
+  motorIniciar(PH1_IN1, PH1_IN2);
+  motorIniciar(PH1_IN3, PH1_IN4);
+  motorIniciar(PH2_IN1, PH2_IN2);
+  motorIniciar(PH2_IN3, PH2_IN4);
 
   pinMode(SENS_ESQ_TRIG, OUTPUT);    pinMode(SENS_ESQ_ECHO, INPUT);
   pinMode(SENS_CENTRO_TRIG, OUTPUT); pinMode(SENS_CENTRO_ECHO, INPUT);
