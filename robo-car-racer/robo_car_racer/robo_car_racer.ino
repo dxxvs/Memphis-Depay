@@ -15,12 +15,15 @@
  *        - tenta ficar no MEIO da pista (compara esquerda x direita);
  *        - se algo aparece na frente, vira para o lado com mais espaco;
  *        - se uma parede lateral fica perto demais, se afasta dela.
- *   3. Suaviza a direcao (para nao ficar "tremendo") e aplica:
- *        - nos servos (rodas esterçam);
- *        - nos motores (lado de fora da curva gira mais rapido).
- *   4. Reduz a velocidade nas curvas e quando tem obstaculo perto.
+ *   3. Suaviza a direcao (para nao ficar "tremendo") e aplica nos
+ *      servos (rodas esterçam).
+ *   4. Em curva forte, os motores do lado de dentro da curva param,
+ *      para o carrinho virar mais fechado.
  *   5. Se chegar MUITO perto de algo na frente, da re virando e
  *      depois segue.
+ *
+ *  VERSAO SIMPLES (teste): usa so os pinos IN1..IN4 das pontes H.
+ *  Deixe os JUMPERS no ENA e ENB (motores sempre na velocidade maxima).
  *
  *  NAO precisa de nenhuma biblioteca extra. Funciona no core ESP32
  *  do Arduino versao 2.x e 3.x.
@@ -38,21 +41,19 @@
 // (Os numeros sao os "Dxx" escritos na placa: D23 = 23, RX2 = 16, TX2 = 17,
 //  VN = 39, VP = 36.)
 
-// ---------- Ponte H 1 (FRENTE) : motor dianteiro ESQ (A) e DIR (B) ----------
-const int PH1_ENA = 23;   // PWM motor dianteiro esquerdo
-const int PH1_IN1 = 22;
-const int PH1_IN2 = 21;
-const int PH1_IN3 = 19;
-const int PH1_IN4 = 18;
-const int PH1_ENB = 5;    // PWM motor dianteiro direito
+// ENA e ENB NAO sao usados: deixe os jumpers neles na ponte H.
 
-// ---------- Ponte H 2 (TRAS) : motor traseiro ESQ (A) e DIR (B) ----------
-const int PH2_ENA = 4;    // PWM motor traseiro esquerdo
-const int PH2_IN1 = 16;   // RX2
-const int PH2_IN2 = 17;   // TX2
-const int PH2_IN3 = 15;
-const int PH2_IN4 = 2;
-const int PH2_ENB = 26;   // PWM motor traseiro direito
+// ---------- Ponte H 1 (FRENTE) ----------
+const int PH1_IN1 = 22;   // motor dianteiro esquerdo
+const int PH1_IN2 = 21;   // motor dianteiro esquerdo
+const int PH1_IN3 = 19;   // motor dianteiro direito
+const int PH1_IN4 = 18;   // motor dianteiro direito
+
+// ---------- Ponte H 2 (TRAS) ----------
+const int PH2_IN1 = 16;   // RX2 - motor traseiro esquerdo
+const int PH2_IN2 = 17;   // TX2 - motor traseiro esquerdo
+const int PH2_IN3 = 15;   // motor traseiro direito
+const int PH2_IN4 = 2;    // motor traseiro direito
 
 // ---------- Sensores HC-SR04 ----------
 // ECHO usa pinos 34, 35 e 39 (VN), que sao so de entrada - perfeitos p/ isso.
@@ -80,15 +81,13 @@ const int  ATRASO_LARGADA_MS = 2000; // espera depois do botao/ligar
 //                    CONFIGURACOES - COMPORTAMENTO
 // =====================================================================
 
-// ---------- Velocidade (0 a 255) ----------
-int VEL_RETA      = 210;  // velocidade em reta
-int VEL_CURVA     = 150;  // velocidade na curva mais fechada
-int VEL_RE        = 170;  // velocidade da re de emergencia
-int PWM_MINIMO    = 90;   // abaixo disso o motor nao vence o atrito
-
-// Quanto os motores ajudam na curva (0 = nada, 1 = lado de dentro para).
-// Valores > 1 fazem o lado de dentro girar para tras (curva bem fechada).
-float GANHO_DIFERENCIAL = 0.7;
+// ---------- Motores ----------
+// Sem ENA/ENB os motores so tem 3 estados: frente, re ou parado.
+// Quando a direcao passar deste valor (0..1), os motores do lado de
+// dentro da curva param, para o carrinho virar mais fechado.
+// 1.1 = nunca para (so os servos fazem a curva).
+float LIMIAR_PARAR_DENTRO = 0.6;
+int   TEMPO_RE_MS         = 350;  // tempo da re de emergencia
 
 // ---------- Distancias (cm) ----------
 float DIST_MAX           = 200; // leituras acima disso = "livre"
@@ -138,14 +137,11 @@ const bool DEBUG = true;
 #define ESP_ARDUINO_VERSION_MAJOR 2
 #endif
 
-const int PWM_MOTOR_FREQ = 1000; // L298N trabalha bem em ~1 kHz
-const int PWM_MOTOR_RES  = 8;    // 0..255
 const int PWM_SERVO_FREQ = 50;   // servo padrao: 50 Hz
 const int PWM_SERVO_RES  = 16;   // 0..65535
 
-// Canais: motores 0..3 (timers 0 e 1), servos 4..6 (timers 2 e 3)
-const int CH_DIANT_ESQ = 0, CH_DIANT_DIR = 1, CH_TRAS_ESQ = 2, CH_TRAS_DIR = 3;
-const int CH_SERVO1 = 4, CH_SERVO2 = 5, CH_SERVO3 = 6;
+// Canais de PWM usados pelos servos
+const int CH_SERVO1 = 0, CH_SERVO2 = 1, CH_SERVO3 = 2;
 
 void pwmConfigurar(int pino, int canal, int freq, int res) {
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -166,52 +162,45 @@ void pwmEscrever(int pino, int canal, uint32_t duty) {
 #endif
 }
 
-// ----- Motores -----
+// ----- Motores (so IN1..IN4, sem ENA/ENB) -----
 struct Motor {
-  int en, inA, inB, canal;
+  int inA, inB;
   bool invertido;
 };
 
-Motor motDiantEsq = {PH1_ENA, PH1_IN1, PH1_IN2, CH_DIANT_ESQ, false};
-Motor motDiantDir = {PH1_ENB, PH1_IN3, PH1_IN4, CH_DIANT_DIR, false};
-Motor motTrasEsq  = {PH2_ENA, PH2_IN1, PH2_IN2, CH_TRAS_ESQ,  false};
-Motor motTrasDir  = {PH2_ENB, PH2_IN3, PH2_IN4, CH_TRAS_DIR,  false};
+Motor motDiantEsq = {PH1_IN1, PH1_IN2, false};
+Motor motDiantDir = {PH1_IN3, PH1_IN4, false};
+Motor motTrasEsq  = {PH2_IN1, PH2_IN2, false};
+Motor motTrasDir  = {PH2_IN3, PH2_IN4, false};
 
 void motorIniciar(Motor &m) {
   pinMode(m.inA, OUTPUT);
   pinMode(m.inB, OUTPUT);
   digitalWrite(m.inA, LOW);
   digitalWrite(m.inB, LOW);
-  pwmConfigurar(m.en, m.canal, PWM_MOTOR_FREQ, PWM_MOTOR_RES);
-  pwmEscrever(m.en, m.canal, 0);
 }
 
-// vel: -255 (re total) .. +255 (frente total)
-void motorAcionar(Motor &m, int vel) {
-  if (m.invertido) vel = -vel;
-  vel = constrain(vel, -255, 255);
-
-  int modulo = abs(vel);
-  if (modulo > 0 && modulo < PWM_MINIMO) modulo = PWM_MINIMO;
-
-  if (vel > 0) {
+// sentido: +1 = frente, -1 = re, 0 = parado
+void motorAcionar(Motor &m, int sentido) {
+  if (m.invertido) sentido = -sentido;
+  if (sentido > 0) {
     digitalWrite(m.inA, HIGH);
     digitalWrite(m.inB, LOW);
-  } else if (vel < 0) {
+  } else if (sentido < 0) {
     digitalWrite(m.inA, LOW);
     digitalWrite(m.inB, HIGH);
   } else {
-    digitalWrite(m.inA, LOW);   // solto (desliza)
+    digitalWrite(m.inA, LOW);
     digitalWrite(m.inB, LOW);
   }
-  pwmEscrever(m.en, m.canal, modulo);
 }
 
-void motoresLados(int velEsq, int velDir) {
-  motorAcionar(motDiantEsq, velEsq);
-  motorAcionar(motTrasEsq,  velEsq);
-  motorAcionar(motDiantDir, velDir);
-  motorAcionar(motTrasDir,  velDir);
+// cada lado: +1 frente, -1 re, 0 parado
+void motoresLados(int ladoEsq, int ladoDir) {
+  motorAcionar(motDiantEsq, ladoEsq);
+  motorAcionar(motTrasEsq,  ladoEsq);
+  motorAcionar(motDiantDir, ladoDir);
+  motorAcionar(motTrasDir,  ladoDir);
 }
 
 void motoresParar() { motoresLados(0, 0); }
@@ -290,8 +279,8 @@ void manobraEmergencia() {
   motoresParar();
   delay(80);
   servosDirecao(-lado);
-  motoresLados(-VEL_RE, -VEL_RE);
-  delay(350);
+  motoresLados(-1, -1);
+  delay(TEMPO_RE_MS);
   motoresParar();
   delay(60);
 
@@ -336,27 +325,18 @@ void controlar() {
   // Suaviza (curvas "bonitinhas", sem tremer)
   direcaoSuave += SUAVIZACAO * (direcao - direcaoSuave);
 
-  // Velocidade: menor na curva e com obstaculo perto
-  float fatorCurva  = fabs(direcaoSuave);
-  float vel = VEL_RETA - (VEL_RETA - VEL_CURVA) * fatorCurva;
-  if (distCentro < DIST_FRENTE_ALERTA) {
-    float f = limitar((distCentro - DIST_FRENTE_EMERG) /
-                      (DIST_FRENTE_ALERTA - DIST_FRENTE_EMERG), 0, 1);
-    vel = VEL_CURVA + (vel - VEL_CURVA) * f;
-  }
-
-  // Diferencial: lado de fora da curva mais rapido
-  float velEsq = vel * (1.0f + GANHO_DIFERENCIAL * direcaoSuave);
-  float velDir = vel * (1.0f - GANHO_DIFERENCIAL * direcaoSuave);
+  // Motores: ambos para frente; em curva forte o lado de dentro para
+  int motE = 1, motD = 1;
+  if (direcaoSuave >  LIMIAR_PARAR_DENTRO) motD = 0;  // curva p/ direita
+  if (direcaoSuave < -LIMIAR_PARAR_DENTRO) motE = 0;  // curva p/ esquerda
 
   servosDirecao(direcaoSuave);
-  motoresLados((int)velEsq, (int)velDir);
+  motoresLados(motE, motD);
 
   if (DEBUG && millis() - ultimoDebug > 200) {
     ultimoDebug = millis();
-    Serial.printf("E:%5.1f  C:%5.1f  D:%5.1f | dir:%+.2f | motE:%4d motD:%4d\n",
-                  distEsq, distCentro, distDir, direcaoSuave,
-                  (int)velEsq, (int)velDir);
+    Serial.printf("E:%5.1f  C:%5.1f  D:%5.1f | dir:%+.2f | motE:%d motD:%d\n",
+                  distEsq, distCentro, distDir, direcaoSuave, motE, motD);
   }
 }
 

@@ -18,24 +18,20 @@ Se a sua ligação for diferente, mude só os números no topo do código (seç�
 ### Ponte H 1 – FRENTE (motores dianteiros)
 | L298N | ESP32 |
 |------|-------|
-| ENA (motor diant. esquerdo) | D23 |
-| IN1 | D22 |
-| IN2 | D21 |
-| IN3 | D19 |
-| IN4 | D18 |
-| ENB (motor diant. direito) | D5 |
+| IN1 (motor diant. esquerdo) | D22 |
+| IN2 (motor diant. esquerdo) | D21 |
+| IN3 (motor diant. direito) | D19 |
+| IN4 (motor diant. direito) | D18 |
 
 ### Ponte H 2 – TRÁS (motores traseiros)
 | L298N | ESP32 |
 |------|-------|
-| ENA (motor tras. esquerdo) | D4 |
-| IN1 | RX2 (16) |
-| IN2 | TX2 (17) |
-| IN3 | D15 |
-| IN4 | D2 |
-| ENB (motor tras. direito) | D26 |
+| IN1 (motor tras. esquerdo) | RX2 (16) |
+| IN2 (motor tras. esquerdo) | TX2 (17) |
+| IN3 (motor tras. direito) | D15 |
+| IN4 (motor tras. direito) | D2 |
 
-> **Tire os jumpers do ENA e ENB** das pontes H e ligue esses pinos no ESP32. Com o jumper o motor fica sempre na velocidade máxima e o carrinho não consegue fazer curva suave.
+> **ENA e ENB não são usados: deixe os jumpers neles** (vêm de fábrica). Os motores andam sempre na velocidade máxima; quem faz a curva são os servos.
 >
 > **GND do ESP32, das duas pontes H e da bateria têm que estar todos ligados juntos.**
 
@@ -69,10 +65,10 @@ Alimente os servos pelo 5V do regulador/bateria (não pelo 3V3 do ESP32).
 2. **Rodas não ficam retas?** Ajuste `SERVO1_CENTRO` / `SERVO2_CENTRO` (ex.: 85, 95...).
 3. **Roda vira para o lado errado?** Troque `SERVO1_SINAL` ou `SERVO2_SINAL` para `-1`.
 4. **Terceiro servo:** `SERVO3_MODO = 0` (fica parado), `1` (vira junto com as da frente) ou `2` (vira ao contrário – direção nas 4 rodas, curva mais fechada).
-5. **Velocidade:** `VEL_RETA` e `VEL_CURVA` (0–255). Se o motor só zumbe sem girar, aumente `PWM_MINIMO`.
+5. **Curva com os motores:** em curva forte, os motores do lado de dentro param. Ajuste `LIMIAR_PARAR_DENTRO` (menor = para mais cedo; `1.1` = nunca para).
 6. **Comportamento:**
    - Ficando em zigue-zague → diminua `KP_CENTRALIZAR` ou `SUAVIZACAO`, ou aumente `ZONA_MORTA`.
    - Demora para desviar → aumente `DIST_FRENTE_ALERTA` ou `GANHO_FRENTE`.
    - Raspando na parede → aumente `DIST_LATERAL_MIN` ou `GANHO_PAREDE`.
-   - Curva muito aberta → aumente `GANHO_DIFERENCIAL` e/ou `SERVO_MAX_GRAUS`.
+   - Curva muito aberta → aumente `SERVO_MAX_GRAUS` ou diminua `LIMIAR_PARAR_DENTRO`.
 7. Para a competição, mude `DEBUG` para `false`.
