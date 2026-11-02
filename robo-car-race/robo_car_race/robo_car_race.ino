@@ -56,11 +56,43 @@
  *
  *  Pinos evitados de propósito:
  *    D34, D35, VP(36), VN(39) -> só entrada, não servem para motor
+ *                                (mas servem para o ECHO dos ultrassônicos)
  *    D12, D15, D2, D5, D0     -> pinos de "boot" (strapping); podem impedir o
  *                                ESP32 de ligar/gravar se estiverem em nível errado
  *    TX0/RX0                  -> usados pelo USB/Monitor Serial
- *  Ficam livres para sensores (ex.: ultrassônico, infravermelho):
- *    D13, D22, D23, D34, D35, VP, VN
+ *
+ * ----------------------------------------------------------------------------
+ *  SENSORES ULTRASSÔNICOS HC-SR04 (3 unidades)
+ * ----------------------------------------------------------------------------
+ *
+ *            ESQ (20°)   FRENTE   DIR (20°)
+ *                 \        |        /
+ *                  \       |       /
+ *                 [==]   [==]   [==]
+ *                 +----------------+
+ *                 |    CARRINHO    |
+ *                 +----------------+
+ *
+ *    Sensor FRENTE ....: TRIG -> D13   ECHO -> D34
+ *    Sensor ESQUERDA ..: TRIG -> D22   ECHO -> D35
+ *    Sensor DIREITA ...: TRIG -> D23   ECHO -> VP (GPIO36)
+ *    VCC dos 3 sensores -> 5V (mesmo 5V que vai no VIN do ESP32)
+ *    GND dos 3 sensores -> GND comum
+ *
+ *  !!! ATENÇÃO: o ECHO do HC-SR04 sai com 5 V e o ESP32 aceita só 3,3 V !!!
+ *  Use um divisor de tensão em CADA pino ECHO:
+ *
+ *     ECHO do sensor ---[ 1 kΩ ]---+---> pino do ESP32 (D34 / D35 / VP)
+ *                                  |
+ *                               [ 2 kΩ ]
+ *                                  |
+ *                                 GND
+ *  (pode ser 10 kΩ + 20 kΩ, ou 1 kΩ + 2,2 kΩ: o importante é a proporção 1:2)
+ *  O TRIG pode ir direto: 3,3 V do ESP32 é suficiente para disparar o sensor.
+ *
+ *  Os sensores são disparados UM DE CADA VEZ (para um não ouvir o eco do
+ *  outro) e lidos por interrupção, então o programa nunca fica travado
+ *  esperando o eco.
  * ============================================================================
  */
 
@@ -82,7 +114,10 @@ const uint32_t ATRASO_LARGADA_MS = 3000;
 
 // Rampa de aceleração: quanto o PWM muda a cada passo, e o tempo do passo.
 // Ex.: passo 5 a cada 10 ms -> de 0 a 255 em ~0,5 s.
+// Para DESACELERAR (frear/fazer curva) o passo é maior, porque reduzir a
+// velocidade não força a bateria e o desvio precisa ser rápido.
 const uint8_t  RAMPA_PASSO = 5;
+const uint8_t  RAMPA_PASSO_FREIO = 40;
 const uint32_t RAMPA_INTERVALO_MS = 10;
 
 // Frequência e resolução do PWM. 1 kHz dá bom torque em baixa velocidade
@@ -105,9 +140,45 @@ const uint8_t TRIM_DD = 100;
 const uint8_t TRIM_TE = 100;
 const uint8_t TRIM_TD = 100;
 
-// true  = sai andando para frente sozinho após ATRASO_LARGADA_MS
-// false = fica parado esperando comandos do Monitor Serial
+// true  = liga o piloto automático (sensores) sozinho após ATRASO_LARGADA_MS
+// false = fica parado esperando comandos do Monitor Serial ('r' = correr)
 const bool LARGADA_AUTOMATICA = true;
+
+// ----------------------------------------------------------------------------
+//  PILOTO AUTOMÁTICO (sensores ultrassônicos) - distâncias em cm
+// ----------------------------------------------------------------------------
+// Calibre estes valores na pista! Ative a telemetria com 'u' no Monitor
+// Serial para ver o que cada sensor está medindo.
+
+// Sensor da FRENTE
+const float DIST_LIVRE      = 120;  // acima disso: velocidade máxima
+const float DIST_CURVA      = 60;   // abaixo disso: começa a curva forte
+const float DIST_EMERGENCIA = 15;   // abaixo disso: dá ré e gira
+
+// Sensores DIAGONAIS (20°)
+const float DIST_DIAG_PERIGO = 25;  // abaixo disso: desvio forte para o outro lado
+const float DIST_DIAG_LIMITE = 150; // acima disso a diagonal conta como "livre"
+
+// Velocidades (0..255)
+const uint8_t VEL_CURVA   = 140;    // velocidade base com obstáculo perto
+const uint8_t VEL_MANOBRA = 170;    // velocidade da ré e do giro de emergência
+
+// Ganhos da direção (quanto o carro vira)
+const float KP_DIAGONAIS = 1.2;     // PWM por cm de diferença entre ESQ e DIR
+const float KP_FRENTE    = 3.0;     // PWM por cm que a frente está abaixo de DIST_CURVA
+const float GANHO_PERIGO = 120;     // PWM extra quando uma diagonal está em perigo
+const float DIRECAO_MAX  = 255;     // limite da correção (255 permite girar no lugar)
+
+// Manobra de emergência (quando a frente fica bloqueada)
+const uint32_t TEMPO_RE_MS       = 300;  // tempo de ré
+const uint32_t TEMPO_GIRO_MIN_MS = 150;  // tempo mínimo girando
+const uint32_t TEMPO_GIRO_MAX_MS = 800;  // tempo máximo girando
+const float    DIST_LIBERADA     = 45;   // frente livre o bastante para voltar a andar
+
+// Leitura dos sensores
+const uint32_t SLOT_SENSOR_MS = 20;      // tempo de cada sensor (3 sensores = 60 ms)
+const float    DIST_MAX       = 300;     // "sem obstáculo" (cm)
+const uint8_t  FALHAS_MAX     = 10;      // leituras sem resposta -> sensor com defeito
 
 // ============================================================================
 //  PINOS
@@ -128,6 +199,14 @@ const uint8_t PIN_IN2_T = 17;
 const uint8_t PIN_IN3_T = 18;
 const uint8_t PIN_IN4_T = 19;
 const uint8_t PIN_ENB_T = 21;
+
+// Ultrassônicos HC-SR04
+const uint8_t PIN_TRIG_FRENTE = 13;
+const uint8_t PIN_ECHO_FRENTE = 34;
+const uint8_t PIN_TRIG_ESQ    = 22;
+const uint8_t PIN_ECHO_ESQ    = 35;
+const uint8_t PIN_TRIG_DIR    = 23;
+const uint8_t PIN_ECHO_DIR    = 36;   // VP
 
 // ============================================================================
 //  PWM compatível com core ESP32 2.x e 3.x
@@ -209,8 +288,13 @@ struct Motor {
     int16_t destino = alvo;
     if ((atual > 0 && alvo < 0) || (atual < 0 && alvo > 0)) destino = 0;
 
-    if (atual < destino) atual = min<int16_t>(atual + RAMPA_PASSO, destino);
-    else                 atual = max<int16_t>(atual - RAMPA_PASSO, destino);
+    // Acelerando (|velocidade| aumentando) -> passo suave.
+    // Desacelerando (|velocidade| diminuindo) -> passo rápido.
+    bool acelerando = abs(destino) > abs(atual);
+    int16_t passo = acelerando ? RAMPA_PASSO : RAMPA_PASSO_FREIO;
+
+    if (atual < destino) atual = min<int16_t>(atual + passo, destino);
+    else                 atual = max<int16_t>(atual - passo, destino);
 
     // Na partida, pula direto para o PWM mínimo (abaixo dele o motor não gira).
     if (atual > 0 && atual < PWM_MINIMO && destino >= PWM_MINIMO)  atual = PWM_MINIMO;
@@ -283,25 +367,281 @@ void atualizarMotores() {
   for (auto m : motores) m->atualizarRampa();
 }
 
+
+// Velocidade de cruzeiro atual (começa em VELOCIDADE_CORRIDA; muda com 0..9)
+uint8_t velocidadeAtual = VELOCIDADE_CORRIDA;
+
+// ============================================================================
+//  SENSORES ULTRASSÔNICOS HC-SR04
+// ============================================================================
+
+#ifndef IRAM_ATTR
+#define IRAM_ATTR
+#endif
+
+struct Ultrassom {
+  const char* nome;
+  uint8_t trig;
+  uint8_t echo;
+
+  // Preenchidos pela interrupção do pino ECHO
+  volatile uint32_t tSubida;   // micros() quando o ECHO subiu
+  volatile uint32_t duracao;   // largura do pulso de ECHO (µs)
+  volatile bool     subiu;     // ECHO subiu depois do disparo
+  volatile bool     novo;      // pulso completo recebido
+
+  float   historico[3];        // últimas 3 leituras (filtro de mediana)
+  uint8_t idxHist;
+  float   distancia;           // distância filtrada (cm)
+  uint8_t falhas;              // leituras seguidas sem nenhuma resposta
+};
+
+Ultrassom sensorFrente = {"FRENTE", PIN_TRIG_FRENTE, PIN_ECHO_FRENTE, 0, 0, false, false, {0, 0, 0}, 0, 0, 0};
+Ultrassom sensorEsq    = {"ESQ",    PIN_TRIG_ESQ,    PIN_ECHO_ESQ,    0, 0, false, false, {0, 0, 0}, 0, 0, 0};
+Ultrassom sensorDir    = {"DIR",    PIN_TRIG_DIR,    PIN_ECHO_DIR,    0, 0, false, false, {0, 0, 0}, 0, 0, 0};
+
+Ultrassom* sensores[] = {&sensorFrente, &sensorEsq, &sensorDir};
+const uint8_t NUM_SENSORES = sizeof(sensores) / sizeof(sensores[0]);
+
+// Interrupção: mede o tempo em que o ECHO fica em nível alto.
+void IRAM_ATTR isrEcho(void* arg) {
+  Ultrassom* s = (Ultrassom*)arg;
+  uint32_t agora = micros();
+  if (digitalRead(s->echo)) {
+    s->tSubida = agora;
+    s->subiu = true;
+  } else if (s->subiu) {
+    s->duracao = agora - s->tSubida;
+    s->novo = true;
+  }
+}
+
+static float mediana3(float a, float b, float c) {
+  if (a > b) { float t = a; a = b; b = t; }
+  if (b > c) { float t = b; b = c; c = t; }
+  if (a > b) { float t = a; a = b; b = t; }
+  return b;
+}
+
+void iniciarSensores() {
+  for (auto s : sensores) {
+    pinMode(s->trig, OUTPUT);
+    digitalWrite(s->trig, LOW);
+    pinMode(s->echo, INPUT);
+    for (auto& h : s->historico) h = DIST_MAX;
+    s->idxHist = 0;
+    s->distancia = DIST_MAX;
+    s->falhas = 0;
+    s->subiu = false;
+    s->novo = false;
+    attachInterruptArg(digitalPinToInterrupt(s->echo), isrEcho, s, CHANGE);
+  }
+}
+
+static void dispararSensor(Ultrassom& s) {
+  s.subiu = false;
+  s.novo = false;
+  digitalWrite(s.trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(s.trig, LOW);
+}
+
+// Chamado no fim do "slot" do sensor: transforma o pulso em centímetros.
+static void finalizarLeitura(Ultrassom& s) {
+  float cm;
+  if (s.novo) {
+    cm = s.duracao / 58.0f;              // tempo (µs) -> distância (cm)
+    if (cm < 2) cm = 2;                  // HC-SR04 não mede menos que ~2 cm
+    if (cm > DIST_MAX) cm = DIST_MAX;
+    s.falhas = 0;
+  } else if (s.subiu) {
+    cm = DIST_MAX;                       // eco não voltou a tempo: caminho livre
+    s.falhas = 0;
+  } else {
+    cm = DIST_MAX;                       // sensor nem respondeu: fio solto?
+    if (s.falhas < 255) s.falhas++;
+  }
+  s.historico[s.idxHist] = cm;
+  s.idxHist = (s.idxHist + 1) % 3;
+  s.distancia = mediana3(s.historico[0], s.historico[1], s.historico[2]);
+}
+
+// Chamar sempre no loop(): dispara um sensor por vez, sem travar o programa.
+// Retorna true quando uma leitura nova ficou pronta.
+bool atualizarSensores() {
+  static uint8_t  atual = 0;
+  static uint32_t tDisparo = 0;
+  static bool     primeiro = true;
+
+  uint32_t agora = millis();
+  if (!primeiro && agora - tDisparo < SLOT_SENSOR_MS) return false;
+
+  bool leituraNova = false;
+  if (!primeiro) {
+    finalizarLeitura(*sensores[atual]);
+    atual = (atual + 1) % NUM_SENSORES;
+    leituraNova = true;
+  }
+  primeiro = false;
+
+  dispararSensor(*sensores[atual]);
+  tDisparo = agora;
+  return leituraNova;
+}
+
+bool sensorComDefeito() {
+  for (auto s : sensores) if (s->falhas >= FALHAS_MAX) return true;
+  return false;
+}
+
+// ============================================================================
+//  PILOTO AUTOMÁTICO
+// ============================================================================
+//
+//  Ideia: o carro tenta sempre ir para o lado que tem MAIS espaço.
+//   - As duas diagonais (20°) são comparadas: se a esquerda tem mais espaço
+//     que a direita, o carro vira para a esquerda, e vice-versa. Isso mantém
+//     o carro no meio da pista e faz ele acompanhar as curvas.
+//   - A frente controla a velocidade: livre = rápido, perto = devagar e
+//     curva mais forte para o lado livre.
+//   - Diagonal muito perto (obstáculo/parede de lado) = desvio forte.
+//   - Frente bloqueada = ré + giro para o lado mais livre.
+
+enum EstadoPiloto { SEGUINDO, DANDO_RE, GIRANDO };
+const char* NOMES_ESTADO[] = {"SEGUINDO", "RE", "GIRANDO"};
+
+bool         modoAutonomo = false;
+EstadoPiloto estado = SEGUINDO;
+uint32_t     tEstado = 0;
+bool         giroParaEsquerda = true;
+uint32_t     tUltimaEmergencia = 0;
+int16_t      saidaEsq = 0, saidaDir = 0;   // última saída (para telemetria)
+
+void comandarLados(int16_t esq, int16_t dir) {
+  saidaEsq = esq;
+  saidaDir = dir;
+  definirLados(esq, dir);
+}
+
+void iniciarPiloto() {
+  modoAutonomo = true;
+  estado = SEGUINDO;
+  tEstado = millis();
+  Serial.println(F("PILOTO AUTOMATICO LIGADO"));
+}
+
+void pararPiloto() {
+  modoAutonomo = false;
+  estado = SEGUINDO;
+}
+
+void pilotoAutomatico() {
+  uint32_t agora = millis();
+  float f = sensorFrente.distancia;
+  float e = sensorEsq.distancia;
+  float d = sensorDir.distancia;
+
+  if (sensorComDefeito()) {
+    pararJa();
+    pararPiloto();
+    Serial.println(F("ERRO: um sensor nao responde. Confira TRIG/ECHO/VCC/GND."));
+    for (auto s : sensores)
+      if (s->falhas >= FALHAS_MAX) Serial.printf("  -> sensor %s\n", s->nome);
+    return;
+  }
+
+  switch (estado) {
+    case SEGUINDO: {
+      // ---- Emergência: frente bloqueada, ou as duas diagonais fechadas ----
+      if (f < DIST_EMERGENCIA || (e < DIST_EMERGENCIA && d < DIST_EMERGENCIA)) {
+        bool novoLado = e > d;   // gira para o lado com mais espaço
+        // Se bateu de novo logo em seguida, tenta o outro lado.
+        if (agora - tUltimaEmergencia < 1500) novoLado = !giroParaEsquerda;
+        giroParaEsquerda = novoLado;
+        tUltimaEmergencia = agora;
+        estado = DANDO_RE;
+        tEstado = agora;
+        comandarLados(-VEL_MANOBRA, -VEL_MANOBRA);
+        return;
+      }
+
+      // ---- Velocidade base pela distância da frente ----
+      float base;
+      if (f >= DIST_LIVRE) {
+        base = velocidadeAtual;
+      } else {
+        float k = (f - DIST_EMERGENCIA) / (DIST_LIVRE - DIST_EMERGENCIA);
+        base = VEL_CURVA + k * ((float)velocidadeAtual - VEL_CURVA);
+      }
+
+      // ---- Direção: positivo = vira para a ESQUERDA ----
+      float el = min(e, DIST_DIAG_LIMITE);
+      float dl = min(d, DIST_DIAG_LIMITE);
+      float erro = el - dl;                      // > 0: mais espaço à esquerda
+      float direcao = KP_DIAGONAIS * erro;
+
+      // Obstáculo/curva à frente: reforça a curva para o lado mais livre.
+      if (f < DIST_CURVA) {
+        float reforco = (DIST_CURVA - f) * KP_FRENTE;
+        direcao += (erro >= 0) ? reforco : -reforco;
+      }
+
+      // Diagonal em perigo: foge para o outro lado.
+      if (e < DIST_DIAG_PERIGO) direcao -= GANHO_PERIGO * (1 - e / DIST_DIAG_PERIGO) + GANHO_PERIGO / 2;
+      if (d < DIST_DIAG_PERIGO) direcao += GANHO_PERIGO * (1 - d / DIST_DIAG_PERIGO) + GANHO_PERIGO / 2;
+
+      direcao = constrain(direcao, -DIRECAO_MAX, DIRECAO_MAX);
+
+      // Virar à esquerda = lado esquerdo mais devagar, direito mais rápido.
+      int16_t ve = constrain((int)(base - direcao), -255, 255);
+      int16_t vd = constrain((int)(base + direcao), -255, 255);
+      comandarLados(ve, vd);
+      break;
+    }
+
+    case DANDO_RE:
+      if (agora - tEstado >= TEMPO_RE_MS) {
+        estado = GIRANDO;
+        tEstado = agora;
+        if (giroParaEsquerda) comandarLados(-VEL_MANOBRA,  VEL_MANOBRA);
+        else                  comandarLados( VEL_MANOBRA, -VEL_MANOBRA);
+      }
+      break;
+
+    case GIRANDO: {
+      uint32_t t = agora - tEstado;
+      if ((t >= TEMPO_GIRO_MIN_MS && f > DIST_LIBERADA) || t >= TEMPO_GIRO_MAX_MS) {
+        estado = SEGUINDO;
+        tEstado = agora;
+      }
+      break;
+    }
+  }
+}
+
 // ============================================================================
 //  COMANDOS PELO MONITOR SERIAL (115200 baud) - para testes
 // ============================================================================
+//   r = CORRER (liga o piloto automático com os sensores)
 //   w = frente      s = ré         a = girar esq.   d = girar dir.
 //   q = curva esq.  e = curva dir. x = parar (rampa) espaço = parar já
 //   0..9 = velocidade (0 = 0 %, 9 = 100 %)
+//   u = liga/desliga telemetria dos sensores
 //   t = teste de cada motor, um por vez
 //   ? = ajuda
+//  Qualquer comando de movimento manual desliga o piloto automático.
 
-uint8_t velocidadeAtual = VELOCIDADE_CORRIDA;
 char    ultimoMovimento = 'x';
 bool    comandoRecebido = false;   // qualquer comando cancela a largada automática
+bool    telemetria = false;
 
 void imprimirAjuda() {
   Serial.println();
   Serial.println(F("=== ROBO CAR RACE - comandos ==="));
+  Serial.println(F(" r CORRER (piloto automatico com sensores)"));
   Serial.println(F(" w frente | s re | a girar esq | d girar dir"));
   Serial.println(F(" q curva esq | e curva dir | x parar | espaco parar ja"));
-  Serial.println(F(" 0..9 velocidade | t testar motores | ? ajuda"));
+  Serial.println(F(" 0..9 velocidade | u telemetria | t testar motores | ? ajuda"));
   Serial.printf("Velocidade atual: %u/255\n", velocidadeAtual);
 }
 
@@ -342,62 +682,83 @@ void lerSerial() {
     if (c >= '0' && c <= '9') {
       velocidadeAtual = (uint8_t)((c - '0') * 255 / 9);
       Serial.printf("Velocidade: %u/255\n", velocidadeAtual);
-      executarMovimento(ultimoMovimento);   // reaplica o movimento atual
+      if (!modoAutonomo) executarMovimento(ultimoMovimento);  // reaplica
+    } else if (c == 'r') {
+      iniciarPiloto();
+    } else if (c == 'u') {
+      telemetria = !telemetria;
+      Serial.printf("Telemetria: %s\n", telemetria ? "ligada" : "desligada");
     } else if (c == ' ') {
+      pararPiloto();
       pararJa();
       ultimoMovimento = 'x';
       Serial.println(F("PARADA IMEDIATA"));
     } else if (c == 't') {
+      pararPiloto();
       testarMotores();
       ultimoMovimento = 'x';
     } else if (c == '?' || c == 'h') {
       imprimirAjuda();
     } else if (strchr("wsadqex", c)) {
+      pararPiloto();
       executarMovimento(c);
-      Serial.printf("Movimento: %c\n", c);
+      Serial.printf("Movimento manual: %c\n", c);
     }
   }
+}
+
+void imprimirTelemetria() {
+  static uint32_t ultimo = 0;
+  if (!telemetria || millis() - ultimo < 200) return;
+  ultimo = millis();
+  Serial.printf("ESQ %5.0f | FRENTE %5.0f | DIR %5.0f cm | %s | motores E %4d D %4d\n",
+                sensorEsq.distancia, sensorFrente.distancia, sensorDir.distancia,
+                modoAutonomo ? NOMES_ESTADO[estado] : "MANUAL",
+                modoAutonomo ? saidaEsq : 0, modoAutonomo ? saidaDir : 0);
 }
 
 // ============================================================================
 //  SETUP / LOOP
 // ============================================================================
 
+uint32_t tLigado = 0;
+bool     largadaPendente = false;
+
 void setup() {
   Serial.begin(115200);
 
   for (auto m : motores) m->iniciar();
+  iniciarSensores();
 
   imprimirAjuda();
 
-  if (LARGADA_AUTOMATICA) {
-    Serial.printf("Largada automatica em %lu ms...\n", (unsigned long)ATRASO_LARGADA_MS);
-    uint32_t inicio = millis();
-    while (millis() - inicio < ATRASO_LARGADA_MS) {
-      lerSerial();
-      if (comandoRecebido) {
-        Serial.println(F("Largada automatica cancelada (comando recebido)."));
-        return;
-      }
-      delay(10);
-    }
-    executarMovimento('w');
-    Serial.println(F("VAI! Andando para frente."));
-  }
+  tLigado = millis();
+  largadaPendente = LARGADA_AUTOMATICA;
+  if (largadaPendente)
+    Serial.printf("Largada automatica em %lu ms... (qualquer comando cancela)\n",
+                  (unsigned long)ATRASO_LARGADA_MS);
 }
 
 void loop() {
   lerSerial();
-  atualizarMotores();
 
-  // --------------------------------------------------------------------------
-  //  Aqui entra a lógica da pista (sensores de obstáculo, linha etc.).
-  //  Exemplo com sensor de obstáculo no D13:
-  //
-  //    if (digitalRead(13) == LOW) {   // obstáculo detectado
-  //      curvaDireita(velocidadeAtual);
-  //    } else {
-  //      frente(velocidadeAtual);
-  //    }
-  // --------------------------------------------------------------------------
+  // Largada automática (os sensores já vão medindo durante a contagem).
+  if (largadaPendente) {
+    if (comandoRecebido) {
+      largadaPendente = false;
+      Serial.println(F("Largada automatica cancelada (comando recebido)."));
+    } else if (millis() - tLigado >= ATRASO_LARGADA_MS) {
+      largadaPendente = false;
+      Serial.println(F("VAI!"));
+      iniciarPiloto();
+    }
+  }
+
+  // Cada leitura nova de sensor = uma decisão nova do piloto.
+  if (atualizarSensores() && modoAutonomo) pilotoAutomatico();
+  // Estados com tempo (ré/giro) também são conferidos fora das leituras.
+  else if (modoAutonomo && estado != SEGUINDO) pilotoAutomatico();
+
+  atualizarMotores();
+  imprimirTelemetria();
 }
