@@ -30,17 +30,39 @@ Código em `robo_car_race/robo_car_race.ino` (Arduino IDE, placa **ESP32 Dev Mod
 - **O ECHO sai com 5 V e o ESP32 só aguenta 3,3 V.** Em cada ECHO, ligue um
   divisor: `ECHO → 1 kΩ → pino do ESP32` e `pino do ESP32 → 2 kΩ → GND`.
 
+### Direção: 2 servos nas rodas dianteiras
+
+| Servo | Sinal | Alimentação |
+|---|---|---|
+| Roda dianteira esquerda | D15 | 5 V de um regulador **separado** |
+| Roda dianteira direita | D2 | 5 V de um regulador **separado** |
+
+- **Não** alimente os servos pelo 5V da L298N nem pelo ESP32: cada servo puxa
+  até 0,5–1 A ao virar e o ESP32 reinicia. Use um step-down (LM2596 / mini-560
+  em 5 V, ou UBEC 5 V 3 A) ligado na bateria, com **GND em comum**.
+- D15 e D2 são pinos de boot: se a gravação falhar, solte o sinal dos servos
+  durante o upload.
+- Calibração no Monitor Serial: `k` centro, `j` tudo à esquerda, `l` tudo à
+  direita. Ajuste `SERVO_*_CENTRO` (rodas retas) e `SERVO_*_INVERTIDO` (roda
+  virando para o lado errado). `ANGULO_MAX` limita quanto a roda vira.
+
 ## Como o piloto automático decide
 
-- **Diagonais:** compara esquerda × direita e vira para o lado com mais espaço.
-  Isso faz o carro seguir as curvas e ficar no meio da pista.
-- **Frente:** livre = velocidade máxima; perto = desacelera e reforça a curva.
-- **Diagonal muito perto** (< 25 cm): desvio forte para o outro lado.
-- **Frente bloqueada** (< 15 cm): ré por 0,3 s e gira para o lado mais livre.
-  Se bloquear de novo logo em seguida, tenta o outro lado.
+- **Obstáculo à frente** (< 60 cm): olha as diagonais, **escolhe o lado mais
+  livre** e vira as rodas (servos) para lá; quanto mais perto, mais vira e
+  mais desacelera. A escolha fica travada até passar do obstáculo (não fica
+  trocando de lado no meio do desvio).
+- **Curvas da pista:** as rodas viram para a diagonal com mais espaço,
+  proporcional à diferença entre esquerda e direita.
+- **Diagonal muito perto** (< 25 cm): rodas viram para o outro lado na hora.
+- **Frente bloqueada** (< 15 cm): manobra em 3 pontos — ré com as rodas para o
+  lado contrário (o bico aponta para o lado livre) e sai com as rodas viradas
+  para o lado livre. Repete se precisar; depois de 3 tentativas tenta o outro lado.
+- **Ajuda do diferencial:** na curva as rodas de dentro giram um pouco mais
+  devagar (`DIFERENCIAL`, 0 = só o servo vira o carro).
 - **Sensor sem resposta:** o carro para e avisa no Monitor Serial qual é.
 
-Todas as distâncias e ganhos ficam no topo do código (seção PILOTO AUTOMÁTICO).
+Todas as distâncias, ângulos e ganhos ficam no topo do código (seção PILOTO AUTOMÁTICO e SERVOS).
 
 ## Como usar
 
@@ -48,7 +70,7 @@ Todas as distâncias e ganhos ficam no topo do código (seção PILOTO AUTOMÁTI
 2. Placa: *ESP32 Dev Module*. Grave o código.
 3. Ao ligar, espera 3 s e liga o piloto automático com `VELOCIDADE_CORRIDA` (0–255).
 4. Monitor Serial 115200: `r` correr (piloto automático), `u` telemetria dos
-   sensores, `w` frente, `s` ré, `a`/`d` girar, `q`/`e` curva, `x` parar,
+   sensores, `w` frente, `s` ré, `a`/`d` girar no lugar, `q`/`e` curva com servo, `j`/`k`/`l` servos, `x` parar,
    espaço = parar já, `0`–`9` velocidade, `t` testa cada motor.
    Qualquer comando manual desliga o piloto automático.
 

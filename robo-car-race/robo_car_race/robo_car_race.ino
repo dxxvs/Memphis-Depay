@@ -93,6 +93,27 @@
  *  Os sensores são disparados UM DE CADA VEZ (para um não ouvir o eco do
  *  outro) e lidos por interrupção, então o programa nunca fica travado
  *  esperando o eco.
+ *
+ * ----------------------------------------------------------------------------
+ *  DIREÇÃO: 2 SERVOMOTORES NAS RODAS DIANTEIRAS (SG90 / MG90S / MG996R)
+ * ----------------------------------------------------------------------------
+ *    Servo da roda dianteira ESQUERDA -> sinal no D15
+ *    Servo da roda dianteira DIREITA  -> sinal no D2
+ *    Fio marrom/preto -> GND comum | fio vermelho -> +5 V | laranja -> sinal
+ *
+ *  !!! ALIMENTAÇÃO DOS SERVOS !!!
+ *  NÃO ligue os servos no 5V da L298N nem no 3V3/VIN do ESP32: cada servo
+ *  puxa até 0,5-1 A ao virar e o ESP32 reinicia. Use um regulador step-down
+ *  (ex.: LM2596 ou mini-560 ajustado em 5 V, ou um UBEC 5 V/3 A) ligado na
+ *  bateria, e junte o GND dele com o GND do ESP32 e das L298N.
+ *
+ *  D15 e D2 são pinos de "boot". O sinal do servo não atrapalha normalmente,
+ *  mas se a gravação falhar ("Failed to connect"), solte o fio de sinal dos
+ *  servos durante o upload (ou segure o botão BOOT).
+ *
+ *  CALIBRAÇÃO (Monitor Serial): 'k' centraliza, 'j' vira tudo para a
+ *  esquerda, 'l' tudo para a direita. Ajuste SERVO_*_CENTRO até as rodas
+ *  ficarem retas e SERVO_*_INVERTIDO se alguma roda virar para o lado errado.
  * ============================================================================
  */
 
@@ -161,19 +182,52 @@ const float DIST_DIAG_LIMITE = 150; // acima disso a diagonal conta como "livre"
 
 // Velocidades (0..255)
 const uint8_t VEL_CURVA   = 140;    // velocidade base com obstáculo perto
-const uint8_t VEL_MANOBRA = 170;    // velocidade da ré e do giro de emergência
+const uint8_t VEL_MANOBRA = 170;    // velocidade da ré e da saída de emergência
 
-// Ganhos da direção (quanto o carro vira)
-const float KP_DIAGONAIS = 1.2;     // PWM por cm de diferença entre ESQ e DIR
-const float KP_FRENTE    = 3.0;     // PWM por cm que a frente está abaixo de DIST_CURVA
-const float GANHO_PERIGO = 120;     // PWM extra quando uma diagonal está em perigo
-const float DIRECAO_MAX  = 255;     // limite da correção (255 permite girar no lugar)
+// Ganhos da direção, em GRAUS de roda (positivo = esquerda)
+const float KP_DIAGONAIS = 0.30;    // graus por cm de diferença entre ESQ e DIR
+const float KP_FRENTE    = 0.80;    // graus por cm que a frente está abaixo de DIST_CURVA
+const float GRAUS_PERIGO = 20;      // graus extras quando uma diagonal está em perigo
+const float HISTERESE_DESVIO = 15;  // cm a mais que a frente precisa abrir para
+                                    // "esquecer" o lado escolhido no desvio
+const uint32_t JANELA_DECISAO_MS = 200;  // depois de ver o obstáculo, continua
+                                         // conferindo o lado por esse tempo
+                                         // (3+ leituras novas) antes de travar
 
 // Manobra de emergência (quando a frente fica bloqueada)
-const uint32_t TEMPO_RE_MS       = 300;  // tempo de ré
-const uint32_t TEMPO_GIRO_MIN_MS = 150;  // tempo mínimo girando
-const uint32_t TEMPO_GIRO_MAX_MS = 800;  // tempo máximo girando
-const float    DIST_LIBERADA     = 45;   // frente livre o bastante para voltar a andar
+// Ré com as rodas viradas para o lado CONTRÁRIO do livre (o bico aponta para
+// o lado livre) e depois sai para frente com as rodas viradas para o livre.
+const uint32_t TEMPO_RE_MS          = 400;  // tempo de ré
+const uint32_t TEMPO_SAIDA_MIN_MS   = 200;  // tempo mínimo saindo
+const uint32_t TEMPO_SAIDA_MAX_MS   = 900;  // tempo máximo saindo
+const float    DIST_LIBERADA        = 45;   // frente livre o bastante para seguir
+const uint8_t  TENTATIVAS_POR_LADO  = 3;    // depois disso tenta o outro lado
+
+// ----------------------------------------------------------------------------
+//  SERVOS DA DIREÇÃO (rodas dianteiras)
+// ----------------------------------------------------------------------------
+const float   ANGULO_MAX = 35;      // quanto a roda vira no máximo (graus)
+
+// Posição do servo (0..180) em que a roda fica RETA. Ajuste com 'k'.
+const float   SERVO_ESQ_CENTRO = 90;
+const float   SERVO_DIR_CENTRO = 90;
+
+// Se com 'j' (esquerda) alguma roda virar para a DIREITA, troque para true.
+const bool    SERVO_ESQ_INVERTIDO = false;
+const bool    SERVO_DIR_INVERTIDO = false;
+
+// Ackermann: na curva a roda de FORA vira um pouco menos que a de DENTRO
+// (1.0 = as duas iguais). Ajuda o carro a não "arrastar" a roda.
+const float   ACKERMANN = 0.85;
+
+// Ajuda do diferencial: na curva as rodas do lado de DENTRO giram mais
+// devagar. 0.0 = só o servo faz a curva; 0.5 = lado de dentro a 50 % no
+// ângulo máximo. Um pouco ajuda bastante nos motores amarelos.
+const float   DIFERENCIAL = 0.35;
+
+// Pulso do servo (µs) para 0° e 180°. SG90 normalmente 500..2400.
+const uint16_t SERVO_PULSO_MIN_US = 500;
+const uint16_t SERVO_PULSO_MAX_US = 2400;
 
 // Leitura dos sensores
 const uint32_t SLOT_SENSOR_MS = 20;      // tempo de cada sensor (3 sensores = 60 ms)
@@ -208,22 +262,34 @@ const uint8_t PIN_ECHO_ESQ    = 35;
 const uint8_t PIN_TRIG_DIR    = 23;
 const uint8_t PIN_ECHO_DIR    = 36;   // VP
 
+// Servos da direção
+const uint8_t PIN_SERVO_ESQ = 15;
+const uint8_t PIN_SERVO_DIR = 2;
+
+// PWM dos servos: 50 Hz, 14 bits (passo de ~1,2 µs)
+const uint32_t SERVO_FREQUENCIA = 50;
+const uint8_t  SERVO_RESOLUCAO  = 14;
+const uint8_t  CANAL_SERVO_ESQ  = 4;   // canais 4 e 5 = timer separado dos
+const uint8_t  CANAL_SERVO_DIR  = 5;   // motores (só usado no core 2.x)
+
 // ============================================================================
 //  PWM compatível com core ESP32 2.x e 3.x
 // ============================================================================
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
   // Core 3.x: o PWM é endereçado pelo próprio pino.
-  static void pwmConfigurar(uint8_t pino, uint8_t /*canal*/) {
-    ledcAttach(pino, PWM_FREQUENCIA, PWM_RESOLUCAO);
+  static void pwmConfigurar(uint8_t pino, uint8_t /*canal*/,
+                            uint32_t freq = PWM_FREQUENCIA, uint8_t res = PWM_RESOLUCAO) {
+    ledcAttach(pino, freq, res);
   }
   static void pwmEscrever(uint8_t pino, uint8_t /*canal*/, uint32_t duty) {
     ledcWrite(pino, duty);
   }
 #else
   // Core 2.x: o PWM é endereçado por canal (0..15).
-  static void pwmConfigurar(uint8_t pino, uint8_t canal) {
-    ledcSetup(canal, PWM_FREQUENCIA, PWM_RESOLUCAO);
+  static void pwmConfigurar(uint8_t pino, uint8_t canal,
+                            uint32_t freq = PWM_FREQUENCIA, uint8_t res = PWM_RESOLUCAO) {
+    ledcSetup(canal, freq, res);
     ledcAttachPin(pino, canal);
   }
   static void pwmEscrever(uint8_t /*pino*/, uint8_t canal, uint32_t duty) {
@@ -342,18 +408,64 @@ void definirLados(int16_t esquerda, int16_t direita) {
   motorTD.alvo = direita;
 }
 
-void frente(uint8_t vel)        { definirLados( vel,  vel); }
-void re(uint8_t vel)            { definirLados(-vel, -vel); }
-void girarEsquerda(uint8_t vel) { definirLados(-vel,  vel); }  // gira no lugar
-void girarDireita(uint8_t vel)  { definirLados( vel, -vel); }  // gira no lugar
+// ============================================================================
+//  DIREÇÃO COM SERVOS (rodas dianteiras)
+// ============================================================================
+//  Convenção: ângulo POSITIVO = rodas viradas para a ESQUERDA,
+//             ângulo NEGATIVO = rodas viradas para a DIREITA.
 
-// Curva suave: o lado de dentro anda mais devagar (fator 0..100 %).
-void curvaEsquerda(uint8_t vel, uint8_t fatorDentro = 40) {
-  definirLados((int16_t)vel * fatorDentro / 100, vel);
+float anguloDirecao = 0;   // ângulo atual pedido (graus)
+
+static void escreverServo(uint8_t pino, uint8_t canal, float posicao) {
+  posicao = constrain(posicao, 0.0f, 180.0f);
+  float pulsoUs = SERVO_PULSO_MIN_US +
+                  (SERVO_PULSO_MAX_US - SERVO_PULSO_MIN_US) * posicao / 180.0f;
+  uint32_t periodoUs = 1000000UL / SERVO_FREQUENCIA;
+  uint32_t duty = (uint32_t)(pulsoUs * ((1UL << SERVO_RESOLUCAO) - 1) / periodoUs);
+  pwmEscrever(pino, canal, duty);
 }
-void curvaDireita(uint8_t vel, uint8_t fatorDentro = 40) {
-  definirLados(vel, (int16_t)vel * fatorDentro / 100);
+
+// Vira as rodas dianteiras. Com Ackermann, a roda de dentro da curva vira
+// o ângulo pedido e a de fora vira um pouco menos.
+void definirDirecao(float graus) {
+  graus = constrain(graus, -ANGULO_MAX, ANGULO_MAX);
+  anguloDirecao = graus;
+
+  float angEsq = graus, angDir = graus;
+  if (graus > 0) angDir = graus * ACKERMANN;   // curva p/ esquerda: dentro = esq
+  if (graus < 0) angEsq = graus * ACKERMANN;   // curva p/ direita:  dentro = dir
+
+  escreverServo(PIN_SERVO_ESQ, CANAL_SERVO_ESQ,
+                SERVO_ESQ_CENTRO + (SERVO_ESQ_INVERTIDO ? -angEsq : angEsq));
+  escreverServo(PIN_SERVO_DIR, CANAL_SERVO_DIR,
+                SERVO_DIR_CENTRO + (SERVO_DIR_INVERTIDO ? -angDir : angDir));
 }
+
+void iniciarServos() {
+  pwmConfigurar(PIN_SERVO_ESQ, CANAL_SERVO_ESQ, SERVO_FREQUENCIA, SERVO_RESOLUCAO);
+  pwmConfigurar(PIN_SERVO_DIR, CANAL_SERVO_DIR, SERVO_FREQUENCIA, SERVO_RESOLUCAO);
+  definirDirecao(0);
+}
+
+// Anda com velocidade 'vel' (-255..255) e as rodas viradas 'graus'.
+// O lado de DENTRO da curva gira mais devagar (DIFERENCIAL), ajudando o servo.
+void dirigir(int16_t vel, float graus) {
+  definirDirecao(graus);
+  float fatorDentro = 1.0f - DIFERENCIAL * fabsf(anguloDirecao) / ANGULO_MAX;
+  int16_t dentro = (int16_t)(vel * fatorDentro);
+  if (anguloDirecao > 0)      definirLados(dentro, vel);   // esquerda
+  else if (anguloDirecao < 0) definirLados(vel, dentro);   // direita
+  else                        definirLados(vel, vel);
+}
+
+void frente(uint8_t vel)        { dirigir( vel, 0); }
+void re(uint8_t vel)            { dirigir(-vel, 0); }
+void curvaEsquerda(uint8_t vel) { dirigir( vel,  ANGULO_MAX); }
+void curvaDireita(uint8_t vel)  { dirigir( vel, -ANGULO_MAX); }
+
+// Gira no lugar só com os motores (rodas retas). Útil para teste.
+void girarEsquerda(uint8_t vel) { definirDirecao(0); definirLados(-vel,  vel); }
+void girarDireita(uint8_t vel)  { definirDirecao(0); definirLados( vel, -vel); }
 
 void parar()   { definirLados(0, 0); }                 // para com rampa
 void pararJa() { for (auto m : motores) m->pararJa(); } // para na hora
@@ -495,44 +607,73 @@ bool sensorComDefeito() {
 }
 
 // ============================================================================
-//  PILOTO AUTOMÁTICO
+//  PILOTO AUTOMÁTICO (direção pelos servos das rodas dianteiras)
 // ============================================================================
 //
-//  Ideia: o carro tenta sempre ir para o lado que tem MAIS espaço.
-//   - As duas diagonais (20°) são comparadas: se a esquerda tem mais espaço
-//     que a direita, o carro vira para a esquerda, e vice-versa. Isso mantém
-//     o carro no meio da pista e faz ele acompanhar as curvas.
-//   - A frente controla a velocidade: livre = rápido, perto = devagar e
-//     curva mais forte para o lado livre.
-//   - Diagonal muito perto (obstáculo/parede de lado) = desvio forte.
-//   - Frente bloqueada = ré + giro para o lado mais livre.
+//  1) SEGUIR A PISTA (curvas): as duas diagonais (20°) são comparadas o tempo
+//     todo. As rodas viram para o lado com MAIS espaço, proporcional à
+//     diferença. Assim o carro acompanha a curva e fica no meio da pista.
+//
+//  2) OBSTÁCULO À FRENTE: quando o sensor da frente fica abaixo de
+//     DIST_CURVA, o carro olha as diagonais, ESCOLHE o lado mais livre e
+//     GUARDA essa escolha (não fica trocando de lado no meio do desvio).
+//     Quanto mais perto o obstáculo, mais as rodas viram para esse lado e
+//     mais o carro desacelera. A escolha só é esquecida quando a frente abre
+//     (DIST_CURVA + HISTERESE_DESVIO).
+//
+//  3) DIAGONAL EM PERIGO: algo muito perto de um lado -> rodas viram para o
+//     outro lado na hora.
+//
+//  4) FRENTE BLOQUEADA (manobra em 3 pontos, como um carro de verdade):
+//     ré com as rodas viradas para o lado CONTRÁRIO do livre (o bico do carro
+//     aponta para o lado livre), depois sai para frente com as rodas todas
+//     viradas para o lado livre. Repete se precisar; depois de algumas
+//     tentativas, tenta o outro lado.
 
-enum EstadoPiloto { SEGUINDO, DANDO_RE, GIRANDO };
-const char* NOMES_ESTADO[] = {"SEGUINDO", "RE", "GIRANDO"};
+enum EstadoPiloto { SEGUINDO, DANDO_RE, SAINDO };
+const char* NOMES_ESTADO[] = {"SEGUINDO", "RE", "SAINDO"};
 
 bool         modoAutonomo = false;
 EstadoPiloto estado = SEGUINDO;
 uint32_t     tEstado = 0;
-bool         giroParaEsquerda = true;
+int8_t       ladoDesvio = 0;          // +1 = esquerda, -1 = direita, 0 = sem obstáculo
+uint32_t     tViuObstaculo = 0;       // quando o obstáculo à frente apareceu
+bool         saidaParaEsquerda = true;
+uint8_t      tentativas = 0;
 uint32_t     tUltimaEmergencia = 0;
-int16_t      saidaEsq = 0, saidaDir = 0;   // última saída (para telemetria)
+int16_t      saidaVel = 0;            // última velocidade comandada (telemetria)
 
-void comandarLados(int16_t esq, int16_t dir) {
-  saidaEsq = esq;
-  saidaDir = dir;
-  definirLados(esq, dir);
+void comandar(int16_t vel, float graus) {
+  saidaVel = vel;
+  dirigir(vel, graus);
+}
+
+// Olha as diagonais e devolve o lado com mais espaço: +1 esquerda, -1 direita.
+int8_t ladoMaisLivre(float e, float d) {
+  return (e >= d) ? +1 : -1;
 }
 
 void iniciarPiloto() {
   modoAutonomo = true;
   estado = SEGUINDO;
   tEstado = millis();
+  ladoDesvio = 0;
+  tentativas = 0;
   Serial.println(F("PILOTO AUTOMATICO LIGADO"));
 }
 
 void pararPiloto() {
   modoAutonomo = false;
   estado = SEGUINDO;
+  ladoDesvio = 0;
+  definirDirecao(0);
+}
+
+static void comecarRe(uint32_t agora) {
+  estado = DANDO_RE;
+  tEstado = agora;
+  // Ré com as rodas para o lado CONTRÁRIO -> o bico gira para o lado livre.
+  comandar(-VEL_MANOBRA, saidaParaEsquerda ? -ANGULO_MAX : ANGULO_MAX);
 }
 
 void pilotoAutomatico() {
@@ -554,18 +695,16 @@ void pilotoAutomatico() {
     case SEGUINDO: {
       // ---- Emergência: frente bloqueada, ou as duas diagonais fechadas ----
       if (f < DIST_EMERGENCIA || (e < DIST_EMERGENCIA && d < DIST_EMERGENCIA)) {
-        bool novoLado = e > d;   // gira para o lado com mais espaço
-        // Se bateu de novo logo em seguida, tenta o outro lado.
-        if (agora - tUltimaEmergencia < 1500) novoLado = !giroParaEsquerda;
-        giroParaEsquerda = novoLado;
-        tUltimaEmergencia = agora;
-        estado = DANDO_RE;
-        tEstado = agora;
-        comandarLados(-VEL_MANOBRA, -VEL_MANOBRA);
+        bool esq = (ladoDesvio != 0) ? (ladoDesvio > 0) : (ladoMaisLivre(e, d) > 0);
+        // Bloqueou de novo logo depois de uma manobra: tenta o outro lado.
+        if (agora - tUltimaEmergencia < 1500) esq = !saidaParaEsquerda;
+        saidaParaEsquerda = esq;
+        tentativas = 0;
+        comecarRe(agora);
         return;
       }
 
-      // ---- Velocidade base pela distância da frente ----
+      // ---- Velocidade pela distância da frente ----
       float base;
       if (f >= DIST_LIVRE) {
         base = velocidadeAtual;
@@ -574,45 +713,62 @@ void pilotoAutomatico() {
         base = VEL_CURVA + k * ((float)velocidadeAtual - VEL_CURVA);
       }
 
-      // ---- Direção: positivo = vira para a ESQUERDA ----
+      // ---- Obstáculo à frente: escolhe (e guarda) o lado mais livre ----
+      if (ladoDesvio == 0 && f < DIST_CURVA) {
+        ladoDesvio = ladoMaisLivre(e, d);
+        tViuObstaculo = agora;
+      } else if (ladoDesvio != 0 && f < DIST_CURVA && agora - tViuObstaculo < JANELA_DECISAO_MS) {
+        ladoDesvio = ladoMaisLivre(e, d);      // ainda confirmando o lado
+      } else if (ladoDesvio != 0 && f > DIST_CURVA + HISTERESE_DESVIO) {
+        ladoDesvio = 0;                          // passou do obstáculo
+      }
+      // Se o lado escolhido fechou e o outro está mais livre, troca.
+      if (ladoDesvio > 0 && e < DIST_DIAG_PERIGO && d > e) ladoDesvio = -1;
+      if (ladoDesvio < 0 && d < DIST_DIAG_PERIGO && e > d) ladoDesvio = +1;
+
+      // ---- Ângulo das rodas (positivo = esquerda) ----
       float el = min(e, DIST_DIAG_LIMITE);
       float dl = min(d, DIST_DIAG_LIMITE);
-      float erro = el - dl;                      // > 0: mais espaço à esquerda
-      float direcao = KP_DIAGONAIS * erro;
+      float graus = KP_DIAGONAIS * (el - dl);    // seguir a pista / curvas
 
-      // Obstáculo/curva à frente: reforça a curva para o lado mais livre.
-      if (f < DIST_CURVA) {
-        float reforco = (DIST_CURVA - f) * KP_FRENTE;
-        direcao += (erro >= 0) ? reforco : -reforco;
+      if (ladoDesvio != 0) {
+        // Desvio: vira para o lado escolhido, mais forte quanto mais perto.
+        float forca = (DIST_CURVA - min(f, DIST_CURVA)) * KP_FRENTE;
+        float ajudaDiagonais = max(0.0f, ladoDesvio * graus);  // só se concordar
+        graus = ladoDesvio * (forca + ajudaDiagonais);
       }
 
       // Diagonal em perigo: foge para o outro lado.
-      if (e < DIST_DIAG_PERIGO) direcao -= GANHO_PERIGO * (1 - e / DIST_DIAG_PERIGO) + GANHO_PERIGO / 2;
-      if (d < DIST_DIAG_PERIGO) direcao += GANHO_PERIGO * (1 - d / DIST_DIAG_PERIGO) + GANHO_PERIGO / 2;
+      if (e < DIST_DIAG_PERIGO) graus -= GRAUS_PERIGO * (1 - e / DIST_DIAG_PERIGO) + GRAUS_PERIGO / 2;
+      if (d < DIST_DIAG_PERIGO) graus += GRAUS_PERIGO * (1 - d / DIST_DIAG_PERIGO) + GRAUS_PERIGO / 2;
 
-      direcao = constrain(direcao, -DIRECAO_MAX, DIRECAO_MAX);
-
-      // Virar à esquerda = lado esquerdo mais devagar, direito mais rápido.
-      int16_t ve = constrain((int)(base - direcao), -255, 255);
-      int16_t vd = constrain((int)(base + direcao), -255, 255);
-      comandarLados(ve, vd);
+      comandar((int16_t)base, graus);   // dirigir() limita a ±ANGULO_MAX
       break;
     }
 
     case DANDO_RE:
       if (agora - tEstado >= TEMPO_RE_MS) {
-        estado = GIRANDO;
+        estado = SAINDO;
         tEstado = agora;
-        if (giroParaEsquerda) comandarLados(-VEL_MANOBRA,  VEL_MANOBRA);
-        else                  comandarLados( VEL_MANOBRA, -VEL_MANOBRA);
+        // Sai para frente com as rodas todas viradas para o lado livre.
+        comandar(VEL_MANOBRA, saidaParaEsquerda ? ANGULO_MAX : -ANGULO_MAX);
       }
       break;
 
-    case GIRANDO: {
+    case SAINDO: {
       uint32_t t = agora - tEstado;
-      if ((t >= TEMPO_GIRO_MIN_MS && f > DIST_LIBERADA) || t >= TEMPO_GIRO_MAX_MS) {
+      if (t >= TEMPO_SAIDA_MIN_MS && f < DIST_EMERGENCIA) {
+        // Ainda bloqueado: mais uma ré (manobra em 3 pontos).
+        if (++tentativas >= TENTATIVAS_POR_LADO) {
+          saidaParaEsquerda = !saidaParaEsquerda;
+          tentativas = 0;
+        }
+        comecarRe(agora);
+      } else if ((t >= TEMPO_SAIDA_MIN_MS && f > DIST_LIBERADA) || t >= TEMPO_SAIDA_MAX_MS) {
         estado = SEGUINDO;
         tEstado = agora;
+        tUltimaEmergencia = agora;
+        ladoDesvio = saidaParaEsquerda ? +1 : -1;  // continua contornando
       }
       break;
     }
@@ -623,8 +779,9 @@ void pilotoAutomatico() {
 //  COMANDOS PELO MONITOR SERIAL (115200 baud) - para testes
 // ============================================================================
 //   r = CORRER (liga o piloto automático com os sensores)
-//   w = frente      s = ré         a = girar esq.   d = girar dir.
-//   q = curva esq.  e = curva dir. x = parar (rampa) espaço = parar já
+//   w = frente      s = ré         a = girar no lugar esq. d = girar no lugar dir.
+//   q = curva esq.  e = curva dir. (com os servos)  x = parar  espaço = parar já
+//   j / k / l = servos toda ESQUERDA / CENTRO / toda DIREITA (calibração)
 //   0..9 = velocidade (0 = 0 %, 9 = 100 %)
 //   u = liga/desliga telemetria dos sensores
 //   t = teste de cada motor, um por vez
@@ -639,8 +796,8 @@ void imprimirAjuda() {
   Serial.println();
   Serial.println(F("=== ROBO CAR RACE - comandos ==="));
   Serial.println(F(" r CORRER (piloto automatico com sensores)"));
-  Serial.println(F(" w frente | s re | a girar esq | d girar dir"));
-  Serial.println(F(" q curva esq | e curva dir | x parar | espaco parar ja"));
+  Serial.println(F(" w frente | s re | a/d girar no lugar | q/e curva com servo"));
+  Serial.println(F(" x parar | espaco parar ja | j/k/l servos esq/centro/dir"));
   Serial.println(F(" 0..9 velocidade | u telemetria | t testar motores | ? ajuda"));
   Serial.printf("Velocidade atual: %u/255\n", velocidadeAtual);
 }
@@ -693,6 +850,15 @@ void lerSerial() {
       pararJa();
       ultimoMovimento = 'x';
       Serial.println(F("PARADA IMEDIATA"));
+    } else if (c == 'j' || c == 'k' || c == 'l') {
+      pararPiloto();
+      parar();
+      ultimoMovimento = 'x';
+      float g = (c == 'j') ? ANGULO_MAX : (c == 'l') ? -ANGULO_MAX : 0;
+      definirDirecao(g);
+      Serial.printf("Servos: %+.0f graus (servo ESQ %.0f, servo DIR %.0f)\n", g,
+                    SERVO_ESQ_CENTRO + (SERVO_ESQ_INVERTIDO ? -1 : 1) * (g < 0 ? g * ACKERMANN : g),
+                    SERVO_DIR_CENTRO + (SERVO_DIR_INVERTIDO ? -1 : 1) * (g > 0 ? g * ACKERMANN : g));
     } else if (c == 't') {
       pararPiloto();
       testarMotores();
@@ -711,10 +877,11 @@ void imprimirTelemetria() {
   static uint32_t ultimo = 0;
   if (!telemetria || millis() - ultimo < 200) return;
   ultimo = millis();
-  Serial.printf("ESQ %5.0f | FRENTE %5.0f | DIR %5.0f cm | %s | motores E %4d D %4d\n",
+  const char* lado = ladoDesvio > 0 ? "desvio ESQ" : ladoDesvio < 0 ? "desvio DIR" : "pista";
+  Serial.printf("ESQ %5.0f | FRENTE %5.0f | DIR %5.0f cm | %s %s | rodas %+5.1f graus | vel %4d\n",
                 sensorEsq.distancia, sensorFrente.distancia, sensorDir.distancia,
                 modoAutonomo ? NOMES_ESTADO[estado] : "MANUAL",
-                modoAutonomo ? saidaEsq : 0, modoAutonomo ? saidaDir : 0);
+                modoAutonomo ? lado : "", anguloDirecao, modoAutonomo ? saidaVel : 0);
 }
 
 // ============================================================================
@@ -728,6 +895,7 @@ void setup() {
   Serial.begin(115200);
 
   for (auto m : motores) m->iniciar();
+  iniciarServos();     // rodas retas
   iniciarSensores();
 
   imprimirAjuda();
@@ -756,7 +924,7 @@ void loop() {
 
   // Cada leitura nova de sensor = uma decisão nova do piloto.
   if (atualizarSensores() && modoAutonomo) pilotoAutomatico();
-  // Estados com tempo (ré/giro) também são conferidos fora das leituras.
+  // Estados com tempo (ré/saída) também são conferidos fora das leituras.
   else if (modoAutonomo && estado != SEGUINDO) pilotoAutomatico();
 
   atualizarMotores();
